@@ -2,9 +2,9 @@ Trouw Gordijn (Wedding Curtain)
 
 A small Rust web app to let guests send a short congratulatory message to a WLED-driven LED curtain at your wedding. The app exposes a simple, wedding-themed page with:
 
-- A text field to submit a message
-- Color and brightness controls
-- Optional photo upload to display a banner photo of the couple on the page
+- A text field to submit a message (rotates per minute)
+- Color picker
+- Brown queue window with a live timer for the current item
 
 It reaches the on-premise WLED controller by creating an SSH tunnel via your onsite laptop (x220) connected through Tailscale.
 
@@ -70,6 +70,49 @@ ssh -NT -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCoun
 ```
 
 Adjust details as per your env vars.
+
+Built-in HTTPS (Let’s Encrypt)
+
+You can enable automatic HTTPS with Let’s Encrypt directly in the app (no reverse proxy required).
+
+- Requires DNS A/AAAA records for your domain pointing to this server, and inbound ports 80 and 443 open.
+- Build with the `acme` feature:
+
+```
+cargo build --release --features acme
+```
+
+- Set these env vars:
+  - `ACME_DOMAIN` — the domain to issue a cert for (e.g., `example.com`)
+  - `ACME_CONTACT_EMAIL` — optional email for the ACME account (recommended)
+  - `ACME_CACHE_DIR` — directory for certificate cache (default `./acme-cache`)
+
+- Run the binary. It will:
+  - Serve HTTPS on `:443` with automatic certificates
+  - Serve HTTP on `:80` that redirects to HTTPS
+
+Binding low ports on Linux:
+
+Either run as root, or grant the binary the capability to bind privileged ports:
+
+```
+sudo setcap 'cap_net_bind_service=+ep' target/release/trouw-gordijn
+```
+
+If `ACME_DOMAIN` is not set or the `acme` feature is not enabled, the app serves plain HTTP on `BIND_HOST:BIND_PORT` as before.
+
+Message rotation & queue
+
+- Messages are queued and displayed for 60 seconds each.
+- After display, messages are removed from the queue (consumed).
+- If there’s only one message, it remains on screen beyond 60s.
+- If a new message arrives and the current single message has already run 60s, the display switches to the new one immediately.
+
+Language selection
+
+- The UI supports Dutch, French, and German.
+- Use the flag buttons in the top-right to switch; the choice is saved in localStorage.
+- Subtitle, labels, submit button, hints, queue title/empty state, and footer are translated.
 
 How messages are sent
 
