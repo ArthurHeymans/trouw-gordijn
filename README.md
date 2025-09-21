@@ -114,6 +114,14 @@ Language selection
 - Use the flag buttons in the top-right to switch; the choice is saved in localStorage.
 - Subtitle, labels, submit button, hints, queue title/empty state, and footer are translated.
 
+Admin page
+
+- Route: `GET /admin` shows the current item and the waiting queue.
+- Remove entries: each item has a Remove button.
+- API: `POST /api/admin/remove` with form body `id=<u64>`.
+- No authentication is applied; anyone with the URL can access/remove.
+- If you remove the current item, it stops immediately; the next queued item becomes current within ~1s.
+
 How messages are sent
 
 - The app first sets brightness/color using WLED’s JSON API: `POST /json/state` with `{ on, bri, seg[0].col }`.
