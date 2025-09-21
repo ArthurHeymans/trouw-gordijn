@@ -1,4 +1,10 @@
-use std::{net::{IpAddr, SocketAddr}, process::Stdio, time::Duration, sync::Arc};
+use std::{
+    collections::VecDeque,
+    net::{IpAddr, SocketAddr},
+    process::Stdio,
+    sync::{Arc, atomic::{AtomicU64, Ordering}},
+    time::{Duration, Instant},
+};
 
 use axum::{
     extract::State,
@@ -32,6 +38,26 @@ struct AppState {
     client: reqwest::Client,
     // simple guard to avoid overlapping tunnel restarts
     tunnel_lock: Arc<Mutex<()>>,
+    // message rotation
+    queue: Arc<Mutex<VecDeque<QueuedMessage>>>,
+    current: Arc<Mutex<Option<CurrentDisplay>>>,
+    next_id: Arc<AtomicU64>,
+}
+
+#[derive(Clone, Debug)]
+struct QueuedMessage {
+    id: u64,
+    text: String,
+    color: Option<String>, // #rrggbb
+    enqueued_at_ms: u128,
+}
+
+#[derive(Clone, Debug)]
+struct CurrentDisplay {
+    id: u64,
+    text: String,
+    color: Option<String>,
+    started: Instant,
 }
 
 static INDEX_HTML_HEADER: &str = r##"<!doctype html>
@@ -56,8 +82,18 @@ static INDEX_HTML_HEADER: &str = r##"<!doctype html>
     input[type=range] { width:100%; }
     button { background: linear-gradient(135deg, var(--gold), #ffde7a); color:#2d2200; font-weight:700; border: none; padding: 12px 18px; border-radius: 12px; cursor: pointer; box-shadow: 0 6px 18px rgba(212,175,55,0.35); }
     button:hover { filter: brightness(1.05); }
-    .hero { display:flex; align-items:center; justify-content:center; background: radial-gradient(1200px 600px at 50% -10%, rgba(212,175,55,0.18), transparent); border-radius: 16px; overflow:hidden; }
+    .hero { display:flex; align-items:stretch; justify-content:stretch; background: radial-gradient(1200px 600px at 50% -10%, rgba(212,175,55,0.18), transparent); border-radius: 16px; overflow:hidden; padding: 0; }
     .hero img { width:100%; height:100%; object-fit:cover; display:block; }
+    .brown { background: #4e342e; color: #fff3e0; border: 1px solid #6d4c41; }
+    .queue-window { background:#4e342e; color:#fff3e0; padding:16px; width:100%; }
+    .queue-title { font-weight:700; margin:0 0 10px; letter-spacing: .3px; }
+    .queue-list { list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:8px; }
+    .queue-item { display:flex; align-items:center; gap:10px; padding:10px; border-radius:10px; background:#5d4037; border:1px solid rgba(0,0,0,0.15); }
+    .queue-item.current { outline:2px solid #ffd180; background:#6d4c41; }
+    .swatch { width:14px; height:14px; border-radius:3px; border:1px solid rgba(0,0,0,0.25); }
+    .text { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .timer { font-variant-numeric: tabular-nums; opacity: .9; }
+    .queue-empty { opacity:.8; font-style:italic; }
     .note { font-size: 12px; color: #a3a1a0; }
     .footer { text-align:center; color:#a3a1a0; margin-top:14px; font-size: 12px; }
     .row { display:flex; gap:12px; align-items:center; }
@@ -91,7 +127,14 @@ static INDEX_HTML_HEADER: &str = r##"<!doctype html>
             <div class="note" style="margin-top:8px">Max 64 tekens. Houd het lief en feestelijk 💛</div>
           </form>
         </div>
-        <div class="hero">"##;
+        <div class="hero brown">
+          <div class="queue-window">
+            <h3 class="queue-title">Berichten wachtrij</h3>
+            <ul id="queueList" class="queue-list">
+              <li class="queue-empty">Geen berichten in de wachtrij…</li>
+            </ul>
+          </div>
+        "##;
 
 static INDEX_HTML_FOOTER: &str = r##"        </div>
       </div>
@@ -115,16 +158,24 @@ async fn main() -> anyhow::Result<()> {
         cfg: cfg.clone(),
         client: reqwest::Client::new(),
         tunnel_lock: Arc::new(Mutex::new(())),
+        queue: Arc::new(Mutex::new(VecDeque::new())),
+        current: Arc::new(Mutex::new(None)),
+        next_id: Arc::new(AtomicU64::new(1)),
     };
 
     // Start tunnel supervision in background
     let tunnel_state = state.clone();
     tokio::spawn(async move { supervise_tunnel(tunnel_state).await });
 
+    // Start message rotation worker
+    let rot_state = state.clone();
+    tokio::spawn(async move { rotation_worker(rot_state).await });
+
     let app = Router::new()
         .route("/", get(index))
         .route("/api/message", post(send_message))
         .route("/assets/app.js", get(app_js))
+        .route("/api/queue", get(get_queue))
         .with_state(state)
         .layer(TraceLayer::new_for_http());
 
@@ -171,7 +222,7 @@ static APP_JS: &str = r#"(function(){
     ev.preventDefault();
     const fd = new FormData(ev.target);
     const res = await fetch('/api/message', { method: 'POST', body: new URLSearchParams(fd) });
-    if(res.ok){ alert('Bericht verstuurd naar het gordijn!'); ev.target.reset(); }
+    if(res.ok){ ev.target.reset(); try{ await refreshQueue(); }catch(e){} }
     else { const t = await res.text(); alert('Mislukt: '+t); }
   }
   window.submitMessage = submitMessage;
@@ -271,7 +322,39 @@ static APP_JS: &str = r#"(function(){
     window.addEventListener('touchend', ()=> dragging=false);
     moveDotTo(hidden.value || '#ffd700');
   }
-  if (document.readyState !== 'loading') initColorWheel(); else window.addEventListener('DOMContentLoaded', initColorWheel);
+  async function refreshQueue(){
+    const ul = document.getElementById('queueList');
+    if(!ul) return;
+    const r = await fetch('/api/queue', { cache: 'no-store' });
+    const data = await r.json();
+    ul.innerHTML = '';
+    if(!data.current && (!data.items || data.items.length===0)){
+      const li = document.createElement('li'); li.className='queue-empty'; li.textContent='Geen berichten in de wachtrij…'; ul.appendChild(li); return;
+    }
+    const renderItem = (item, isCurrent, elapsed) => {
+      const li = document.createElement('li'); li.className='queue-item'+(isCurrent?' current':'');
+      const sw = document.createElement('span'); sw.className='swatch'; sw.style.background = item.color || '#ffd700'; li.appendChild(sw);
+      const text = document.createElement('span'); text.className='text'; text.textContent=item.text; li.appendChild(text);
+      if(isCurrent){ const t = document.createElement('span'); t.className='timer'; const s = Math.max(0, Math.min(60, Math.floor(elapsed||0))); t.textContent = '⏱ ' + String(s).padStart(2,'0')+'s'; t.setAttribute('data-elapsed', String(s)); li.appendChild(t); }
+      return li;
+    };
+    if(data.current){ ul.appendChild(renderItem(data.current, true, data.elapsed_seconds)); }
+    for(const it of (data.items||[])){ ul.appendChild(renderItem(it, false)); }
+  }
+
+  function tickTimer(){
+    const t = document.querySelector('.queue-item.current .timer');
+    if(!t) return; let s = parseInt(t.getAttribute('data-elapsed')||'0',10); s = Math.min(60, s+1); t.setAttribute('data-elapsed', String(s)); t.textContent='⏱ ' + String(s).padStart(2,'0')+'s';
+  }
+
+  function boot(){
+    initColorWheel();
+    refreshQueue();
+    setInterval(()=>{ refreshQueue().catch(()=>{}); }, 5000);
+    setInterval(tickTimer, 1000);
+  }
+
+  if (document.readyState !== 'loading') boot(); else window.addEventListener('DOMContentLoaded', boot);
 })();"#;
 
 async fn app_js() -> impl IntoResponse {
@@ -289,59 +372,17 @@ struct MessageForm {
 }
 
 async fn send_message(State(state): State<AppState>, Form(form): Form<MessageForm>) -> impl IntoResponse {
-    let text = form.text.trim();
+    let text = form.text.trim().to_string();
     if text.is_empty() || text.len() > 128 {
         return (StatusCode::BAD_REQUEST, "Invalid text").into_response();
     }
 
-    // Ensure tunnel is up (best-effort)
-    if let Err(e) = ensure_tunnel(&state).await { error!(?e, "tunnel ensure failed"); }
-
-    let base = format!("http://127.0.0.1:{}", state.cfg.local_tunnel_port);
-
-    // 1) Try JSON state for brightness and color
-    let (r, g, b) = form
-        .color
-        .as_deref()
-        .and_then(parse_hex_color)
-        .unwrap_or((255, 215, 0)); // gold
-    let bri: u8 = 128; // fixed brightness since UI control is removed
-    let json_body = serde_json::json!({
-        "on": true,
-        "bri": bri,
-        "seg": [{ "id": 0, "col": [[r, g, b]] }]
-    });
-    let res1 = state
-        .client
-        .post(format!("{}/json/state", base))
-        .json(&json_body)
-        .send()
-        .await;
-    if let Err(e) = res1 { error!(?e, "WLED JSON state request failed"); }
-
-    // Optionally switch to a preset that shows scrolling text on your WLED
-    if let Some(ps) = state.cfg.text_preset_id {
-        let _ = state
-            .client
-            .post(format!("{}/json/state", base))
-            .json(&serde_json::json!({"ps": ps}))
-            .send()
-            .await;
-    }
-
-    // 2) Try text via simple /win API if configured
-    if let Some(key) = &state.cfg.text_param_key {
-        let url = format!(
-            "{}/win?{}={}",
-            base,
-            key,
-            urlencoding::encode(text)
-        );
-        let res2 = state.client.get(url).send().await;
-        if let Err(e) = res2 { error!(?e, "WLED text (/win) request failed"); }
-    }
-
-    (StatusCode::OK, "ok").into_response()
+    // Enqueue for rotation
+    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    let mut q = state.queue.lock().await;
+    q.push_back(QueuedMessage { id, text, color: form.color, enqueued_at_ms: now_ms() });
+    drop(q);
+    (StatusCode::OK, "queued").into_response()
 }
 
 // Upload endpoint removed
@@ -405,4 +446,103 @@ async fn ensure_tunnel(state: &AppState) -> anyhow::Result<()> {
     let _child = cmd.spawn()?; // intentionally not awaited; relies on autossh-like keepalive via supervise
     time::sleep(Duration::from_millis(400)).await;
     Ok(())
+}
+
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+async fn rotation_worker(state: AppState) {
+    loop {
+        // If no current and something is queued, start it
+        {
+            let mut cur = state.current.lock().await;
+            if cur.is_none() {
+                let mut q = state.queue.lock().await;
+                if let Some(next) = q.pop_front() {
+                    let display = CurrentDisplay {
+                        id: next.id,
+                        text: next.text.clone(),
+                        color: next.color.clone(),
+                        started: Instant::now(),
+                    };
+                    *cur = Some(display.clone());
+                    drop(q);
+                    drop(cur);
+                    if let Err(e) = apply_display(&state, &display.text, display.color.as_deref()).await {
+                        error!(?e, "apply_display failed");
+                    }
+                }
+            }
+        }
+
+        // If current elapsed >= 60s, rotate it to back
+        {
+            let mut cur = state.current.lock().await;
+            if let Some(ref display) = *cur {
+                if display.started.elapsed() >= Duration::from_secs(60) {
+                    let mut q = state.queue.lock().await;
+                    q.push_back(QueuedMessage {
+                        id: display.id,
+                        text: display.text.clone(),
+                        color: display.color.clone(),
+                        enqueued_at_ms: now_ms(),
+                    });
+                    *cur = None;
+                }
+            }
+        }
+        time::sleep(Duration::from_millis(900)).await;
+    }
+}
+
+async fn apply_display(state: &AppState, text: &str, color: Option<&str>) -> anyhow::Result<()> {
+    if let Err(e) = ensure_tunnel(state).await { error!(?e, "tunnel ensure failed"); }
+    let base = format!("http://127.0.0.1:{}", state.cfg.local_tunnel_port);
+
+    let (r, g, b) = color.and_then(parse_hex_color).unwrap_or((255, 215, 0));
+    let bri: u8 = 128;
+    let json_body = serde_json::json!({
+        "on": true,
+        "bri": bri,
+        "seg": [{ "id": 0, "n": text, "col": [[r, g, b]] }]
+    });
+    let _ = state.client.post(format!("{}/json/state", base)).json(&json_body).send().await;
+
+    if let Some(ps) = state.cfg.text_preset_id {
+        let _ = state.client.post(format!("{}/json/state", base)).json(&serde_json::json!({"ps": ps})).send().await;
+    }
+
+    if let Some(key) = &state.cfg.text_param_key {
+        let url = format!("{}/win?{}={}", base, key, urlencoding::encode(text));
+        let _ = state.client.get(url).send().await;
+    }
+    Ok(())
+}
+
+async fn get_queue(State(state): State<AppState>) -> impl IntoResponse {
+    let cur = state.current.lock().await;
+    let (current, elapsed) = if let Some(ref c) = *cur {
+        (Some(serde_json::json!({
+            "id": c.id,
+            "text": c.text,
+            "color": c.color,
+        })), c.started.elapsed().as_secs())
+    } else { (None, 0) };
+    drop(cur);
+    let q = state.queue.lock().await;
+    let items: Vec<_> = q.iter().map(|m| serde_json::json!({
+        "id": m.id,
+        "text": m.text,
+        "color": m.color,
+    })).collect();
+    let body = serde_json::json!({
+        "current": current,
+        "elapsed_seconds": elapsed,
+        "items": items,
+    });
+    ([ (header::CACHE_CONTROL, "no-store, max-age=0"), (header::PRAGMA, "no-cache"), (header::CONTENT_TYPE, "application/json") ], body.to_string())
 }
