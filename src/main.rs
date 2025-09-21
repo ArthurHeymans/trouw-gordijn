@@ -377,12 +377,29 @@ async fn send_message(State(state): State<AppState>, Form(form): Form<MessageFor
         return (StatusCode::BAD_REQUEST, "Invalid text").into_response();
     }
 
-    // Enqueue for rotation
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-    let mut q = state.queue.lock().await;
-    q.push_back(QueuedMessage { id, text, color: form.color, enqueued_at_ms: now_ms() });
-    drop(q);
-    (StatusCode::OK, "queued").into_response()
+
+    // If only the last item is showing and it already ran 60s, jump to the new one immediately
+    let mut switched_now = false;
+    {
+        let mut cur = state.current.lock().await;
+        if let Some(ref display) = *cur {
+            if display.started.elapsed() >= Duration::from_secs(60) {
+                let new_disp = CurrentDisplay { id, text: text.clone(), color: form.color.clone(), started: Instant::now() };
+                *cur = Some(new_disp.clone());
+                switched_now = true;
+                drop(cur);
+                if let Err(e) = apply_display(&state, &new_disp.text, new_disp.color.as_deref()).await { error!(?e, "apply_display failed"); }
+            }
+        }
+    }
+
+    if !switched_now {
+        // Enqueue for rotation
+        let mut q = state.queue.lock().await;
+        q.push_back(QueuedMessage { id, text, color: form.color, enqueued_at_ms: now_ms() });
+    }
+    (StatusCode::OK, if switched_now { "switched" } else { "queued" }).into_response()
 }
 
 // Upload endpoint removed
@@ -479,20 +496,31 @@ async fn rotation_worker(state: AppState) {
             }
         }
 
-        // If current elapsed >= 60s, rotate it to back
+        // If current elapsed >= 60s, advance to next if present; otherwise keep displaying last
         {
-            let mut cur = state.current.lock().await;
-            if let Some(ref display) = *cur {
-                if display.started.elapsed() >= Duration::from_secs(60) {
-                    let mut q = state.queue.lock().await;
-                    q.push_back(QueuedMessage {
-                        id: display.id,
-                        text: display.text.clone(),
-                        color: display.color.clone(),
-                        enqueued_at_ms: now_ms(),
-                    });
-                    *cur = None;
+            let mut maybe_new_display: Option<CurrentDisplay> = None;
+            {
+                let mut cur = state.current.lock().await;
+                if let Some(ref display) = *cur {
+                    if display.started.elapsed() >= Duration::from_secs(60) {
+                        let mut q = state.queue.lock().await;
+                        if let Some(next) = q.pop_front() {
+                            let new_disp = CurrentDisplay {
+                                id: next.id,
+                                text: next.text.clone(),
+                                color: next.color.clone(),
+                                started: Instant::now(),
+                            };
+                            *cur = Some(new_disp.clone());
+                            maybe_new_display = Some(new_disp);
+                        } else {
+                            // No next item; keep showing current as-is (the last item stays)
+                        }
+                    }
                 }
+            }
+            if let Some(d) = maybe_new_display {
+                if let Err(e) = apply_display(&state, &d.text, d.color.as_deref()).await { error!(?e, "apply_display failed"); }
             }
         }
         time::sleep(Duration::from_millis(900)).await;
