@@ -2,7 +2,10 @@ use std::{
     collections::VecDeque,
     net::{IpAddr, SocketAddr},
     process::Stdio,
-    sync::{Arc, atomic::{AtomicU64, Ordering}},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -30,6 +33,13 @@ struct AppConfig {
     local_tunnel_port: u16,
     text_param_key: Option<String>,
     text_preset_id: Option<i32>,
+    // ACME/HTTPS (only when feature enabled)
+    #[cfg(feature = "acme")]
+    acme_domain: Option<String>,
+    #[cfg(feature = "acme")]
+    acme_contact_email: Option<String>,
+    #[cfg(feature = "acme")]
+    acme_cache_dir: String,
 }
 
 #[derive(Clone)]
@@ -49,7 +59,6 @@ struct QueuedMessage {
     id: u64,
     text: String,
     color: Option<String>, // #rrggbb
-    enqueued_at_ms: u128,
 }
 
 #[derive(Clone, Debug)]
@@ -187,6 +196,21 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state)
         .layer(TraceLayer::new_for_http());
 
+    // If ACME is configured and the feature is enabled, serve HTTPS with automatic certificates
+    #[cfg(feature = "acme")]
+    {
+        if let Some(domain) = cfg.acme_domain.clone() {
+            return serve_with_acme(
+                app,
+                domain,
+                cfg.acme_contact_email.clone(),
+                cfg.acme_cache_dir.clone(),
+            )
+            .await;
+        }
+    }
+
+    // Fallback: plain HTTP
     let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
     info!("listening on {}", cfg.bind_addr);
     axum::serve(listener, app).await?;
@@ -195,14 +219,33 @@ async fn main() -> anyhow::Result<()> {
 
 fn load_config() -> anyhow::Result<AppConfig> {
     let bind_host = std::env::var("BIND_HOST").unwrap_or_else(|_| "0.0.0.0".into());
-    let bind_port: u16 = std::env::var("BIND_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8080);
-    let ssh_host = std::env::var("SSH_HOST").unwrap_or_else(|_| "x220-nixos.tail19d694.ts.net".into());
+    let bind_port: u16 = std::env::var("BIND_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8080);
+    let ssh_host =
+        std::env::var("SSH_HOST").unwrap_or_else(|_| "x220-nixos.tail19d694.ts.net".into());
     let ssh_user = std::env::var("SSH_USER").ok();
     let wled_host = std::env::var("WLED_HOST").unwrap_or_else(|_| "127.0.0.1".into()); // host as seen from SSH host
-    let wled_port: u16 = std::env::var("WLED_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(80);
-    let local_tunnel_port: u16 = std::env::var("LOCAL_TUNNEL_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(18080);
+    let wled_port: u16 = std::env::var("WLED_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(80);
+    let local_tunnel_port: u16 = std::env::var("LOCAL_TUNNEL_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(18080);
     let text_param_key = std::env::var("TEXT_PARAM_KEY").ok(); // e.g. "TT" if a Text usermod is installed
-    let text_preset_id = std::env::var("TEXT_PRESET_ID").ok().and_then(|s| s.parse().ok());
+    let text_preset_id = std::env::var("TEXT_PRESET_ID")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    // ACME options
+    #[cfg(feature = "acme")]
+    let acme_domain = std::env::var("ACME_DOMAIN").ok();
+    #[cfg(feature = "acme")]
+    let acme_contact_email = std::env::var("ACME_CONTACT_EMAIL").ok();
+    #[cfg(feature = "acme")]
+    let acme_cache_dir = std::env::var("ACME_CACHE_DIR").unwrap_or_else(|_| "./acme-cache".into());
 
     let ip: IpAddr = bind_host.parse().unwrap_or(IpAddr::from([0, 0, 0, 0]));
     Ok(AppConfig {
@@ -214,6 +257,12 @@ fn load_config() -> anyhow::Result<AppConfig> {
         local_tunnel_port,
         text_param_key,
         text_preset_id,
+        #[cfg(feature = "acme")]
+        acme_domain,
+        #[cfg(feature = "acme")]
+        acme_contact_email,
+        #[cfg(feature = "acme")]
+        acme_cache_dir,
     })
 }
 
@@ -222,7 +271,13 @@ async fn index(State(_state): State<AppState>) -> impl IntoResponse {
     html.push_str("<!-- UI_VERSION: wheel-v4 -->\n");
     html.push_str(INDEX_HTML_HEADER);
     html.push_str(INDEX_HTML_FOOTER);
-    ([ (header::CACHE_CONTROL, "no-store, max-age=0"), (header::PRAGMA, "no-cache") ], Html(html))
+    (
+        [
+            (header::CACHE_CONTROL, "no-store, max-age=0"),
+            (header::PRAGMA, "no-cache"),
+        ],
+        Html(html),
+    )
 }
 
 static APP_JS: &str = r#"(function(){
@@ -422,11 +477,17 @@ static APP_JS: &str = r#"(function(){
 })();"#;
 
 async fn app_js() -> impl IntoResponse {
-    ([
-        (header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
-        (header::CACHE_CONTROL, "no-store, max-age=0"),
-        (header::PRAGMA, "no-cache"),
-    ], APP_JS)
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (header::CACHE_CONTROL, "no-store, max-age=0"),
+            (header::PRAGMA, "no-cache"),
+        ],
+        APP_JS,
+    )
 }
 
 #[derive(Deserialize, Debug)]
@@ -435,7 +496,10 @@ struct MessageForm {
     color: Option<String>, // #rrggbb
 }
 
-async fn send_message(State(state): State<AppState>, Form(form): Form<MessageForm>) -> impl IntoResponse {
+async fn send_message(
+    State(state): State<AppState>,
+    Form(form): Form<MessageForm>,
+) -> impl IntoResponse {
     let text = form.text.trim().to_string();
     if text.is_empty() || text.len() > 128 {
         return (StatusCode::BAD_REQUEST, "Invalid text").into_response();
@@ -449,11 +513,20 @@ async fn send_message(State(state): State<AppState>, Form(form): Form<MessageFor
         let mut cur = state.current.lock().await;
         if let Some(ref display) = *cur {
             if display.started.elapsed() >= Duration::from_secs(60) {
-                let new_disp = CurrentDisplay { id, text: text.clone(), color: form.color.clone(), started: Instant::now() };
+                let new_disp = CurrentDisplay {
+                    id,
+                    text: text.clone(),
+                    color: form.color.clone(),
+                    started: Instant::now(),
+                };
                 *cur = Some(new_disp.clone());
                 switched_now = true;
                 drop(cur);
-                if let Err(e) = apply_display(&state, &new_disp.text, new_disp.color.as_deref()).await { error!(?e, "apply_display failed"); }
+                if let Err(e) =
+                    apply_display(&state, &new_disp.text, new_disp.color.as_deref()).await
+                {
+                    error!(?e, "apply_display failed");
+                }
             }
         }
     }
@@ -461,20 +534,30 @@ async fn send_message(State(state): State<AppState>, Form(form): Form<MessageFor
     if !switched_now {
         // Enqueue for rotation
         let mut q = state.queue.lock().await;
-        q.push_back(QueuedMessage { id, text, color: form.color, enqueued_at_ms: now_ms() });
+        q.push_back(QueuedMessage {
+            id,
+            text,
+            color: form.color,
+        });
     }
-    (StatusCode::OK, if switched_now { "switched" } else { "queued" }).into_response()
+    (
+        StatusCode::OK,
+        if switched_now { "switched" } else { "queued" },
+    )
+        .into_response()
 }
 
 // Upload endpoint removed
 
 fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
     let s = s.strip_prefix('#').unwrap_or(s);
-    if s.len() != 6 { return None; }
+    if s.len() != 6 {
+        return None;
+    }
     let r = u8::from_str_radix(&s[0..2], 16).ok()?;
     let g = u8::from_str_radix(&s[2..4], 16).ok()?;
     let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-    Some((r,g,b))
+    Some((r, g, b))
 }
 
 async fn supervise_tunnel(state: AppState) {
@@ -496,7 +579,7 @@ async fn supervise_tunnel(state: AppState) {
 
 async fn ensure_tunnel(state: &AppState) -> anyhow::Result<()> {
     let _g = state.tunnel_lock.lock().await; // serialize restarts
-    // quick probe if local port already responds
+                                             // quick probe if local port already responds
     let base = format!("http://127.0.0.1:{}", state.cfg.local_tunnel_port);
     if state.client.get(format!("{}/", base)).send().await.is_ok() {
         return Ok(());
@@ -504,7 +587,10 @@ async fn ensure_tunnel(state: &AppState) -> anyhow::Result<()> {
 
     // Start ssh -NT -L 127.0.0.1:<local>:<wled_host>:<wled_port> <ssh_target>
     let mut target = String::new();
-    if let Some(user) = &state.cfg.ssh_user { target.push_str(user); target.push('@'); }
+    if let Some(user) = &state.cfg.ssh_user {
+        target.push_str(user);
+        target.push('@');
+    }
     target.push_str(&state.cfg.ssh_host);
 
     let forward = format!(
@@ -515,10 +601,14 @@ async fn ensure_tunnel(state: &AppState) -> anyhow::Result<()> {
     info!("starting ssh tunnel to {} forwarding {}", target, forward);
     let mut cmd = Command::new("ssh");
     cmd.arg("-NT")
-        .arg("-o").arg("ExitOnForwardFailure=yes")
-        .arg("-o").arg("ServerAliveInterval=10")
-        .arg("-o").arg("ServerAliveCountMax=3")
-        .arg("-L").arg(forward)
+        .arg("-o")
+        .arg("ExitOnForwardFailure=yes")
+        .arg("-o")
+        .arg("ServerAliveInterval=10")
+        .arg("-o")
+        .arg("ServerAliveCountMax=3")
+        .arg("-L")
+        .arg(forward)
         .arg(target)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -529,11 +619,68 @@ async fn ensure_tunnel(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn now_ms() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
+// no-op
+
+#[cfg(feature = "acme")]
+async fn serve_with_acme(
+    app: Router,
+    domain: String,
+    contact: Option<String>,
+    cache_dir: String,
+) -> anyhow::Result<()> {
+    use axum::{http::Uri, response::IntoResponse};
+    use axum_server::Handle;
+    use rustls_acme::{caches::DirCache, AcmeConfig};
+
+    // Configure Let's Encrypt (use TLS-ALPN-01 on 443 and redirect 80->443)
+    let mut cfg = AcmeConfig::new(vec![domain.clone()])
+        .cache(DirCache::new(cache_dir))
+        .directory_lets_encrypt(true)
+        .ocsp(true);
+    if let Some(c) = contact {
+        cfg = cfg.contact_push(format!("mailto:{}", c));
+    }
+
+    let mut state = cfg.state();
+    tokio::spawn(async move {
+        loop {
+            if let Err(e) = state.execute().await {
+                error!(?e, "acme state error");
+                time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    });
+
+    let acceptor = rustls_acme::axum::AxumAcceptor::new(state);
+    let handle = Handle::new();
+
+    // HTTPS server
+    let https = axum_server::bind_acceptor((std::net::Ipv4Addr::UNSPECIFIED, 443).into(), acceptor)
+        .handle(handle.clone())
+        .serve(app.into_make_service());
+
+    // HTTP redirect server
+    let redir_app = Router::new().fallback(move |uri: Uri| {
+        let host = domain.clone();
+        async move {
+            let location = format!("https://{}{}", host, uri);
+            (
+                StatusCode::MOVED_PERMANENTLY,
+                [(header::LOCATION, location)],
+            )
+                .into_response()
+        }
+    });
+    let http = axum_server::bind((std::net::Ipv4Addr::UNSPECIFIED, 80).into())
+        .handle(handle.clone())
+        .serve(redir_app.into_make_service());
+
+    info!("ACME enabled; serving HTTPS for domain");
+    tokio::select! {
+        r = https => { r?; },
+        r = http => { r?; },
+    }
+    Ok(())
 }
 
 async fn rotation_worker(state: AppState) {
@@ -553,7 +700,9 @@ async fn rotation_worker(state: AppState) {
                     *cur = Some(display.clone());
                     drop(q);
                     drop(cur);
-                    if let Err(e) = apply_display(&state, &display.text, display.color.as_deref()).await {
+                    if let Err(e) =
+                        apply_display(&state, &display.text, display.color.as_deref()).await
+                    {
                         error!(?e, "apply_display failed");
                     }
                 }
@@ -584,7 +733,9 @@ async fn rotation_worker(state: AppState) {
                 }
             }
             if let Some(d) = maybe_new_display {
-                if let Err(e) = apply_display(&state, &d.text, d.color.as_deref()).await { error!(?e, "apply_display failed"); }
+                if let Err(e) = apply_display(&state, &d.text, d.color.as_deref()).await {
+                    error!(?e, "apply_display failed");
+                }
             }
         }
         time::sleep(Duration::from_millis(900)).await;
@@ -592,7 +743,9 @@ async fn rotation_worker(state: AppState) {
 }
 
 async fn apply_display(state: &AppState, text: &str, color: Option<&str>) -> anyhow::Result<()> {
-    if let Err(e) = ensure_tunnel(state).await { error!(?e, "tunnel ensure failed"); }
+    if let Err(e) = ensure_tunnel(state).await {
+        error!(?e, "tunnel ensure failed");
+    }
     let base = format!("http://127.0.0.1:{}", state.cfg.local_tunnel_port);
 
     let (r, g, b) = color.and_then(parse_hex_color).unwrap_or((255, 215, 0));
@@ -602,10 +755,20 @@ async fn apply_display(state: &AppState, text: &str, color: Option<&str>) -> any
         "bri": bri,
         "seg": [{ "id": 0, "n": text, "col": [[r, g, b]] }]
     });
-    let _ = state.client.post(format!("{}/json/state", base)).json(&json_body).send().await;
+    let _ = state
+        .client
+        .post(format!("{}/json/state", base))
+        .json(&json_body)
+        .send()
+        .await;
 
     if let Some(ps) = state.cfg.text_preset_id {
-        let _ = state.client.post(format!("{}/json/state", base)).json(&serde_json::json!({"ps": ps})).send().await;
+        let _ = state
+            .client
+            .post(format!("{}/json/state", base))
+            .json(&serde_json::json!({"ps": ps}))
+            .send()
+            .await;
     }
 
     if let Some(key) = &state.cfg.text_param_key {
@@ -618,23 +781,40 @@ async fn apply_display(state: &AppState, text: &str, color: Option<&str>) -> any
 async fn get_queue(State(state): State<AppState>) -> impl IntoResponse {
     let cur = state.current.lock().await;
     let (current, elapsed) = if let Some(ref c) = *cur {
-        (Some(serde_json::json!({
-            "id": c.id,
-            "text": c.text,
-            "color": c.color,
-        })), c.started.elapsed().as_secs())
-    } else { (None, 0) };
+        (
+            Some(serde_json::json!({
+                "id": c.id,
+                "text": c.text,
+                "color": c.color,
+            })),
+            c.started.elapsed().as_secs(),
+        )
+    } else {
+        (None, 0)
+    };
     drop(cur);
     let q = state.queue.lock().await;
-    let items: Vec<_> = q.iter().map(|m| serde_json::json!({
-        "id": m.id,
-        "text": m.text,
-        "color": m.color,
-    })).collect();
+    let items: Vec<_> = q
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "id": m.id,
+                "text": m.text,
+                "color": m.color,
+            })
+        })
+        .collect();
     let body = serde_json::json!({
         "current": current,
         "elapsed_seconds": elapsed,
         "items": items,
     });
-    ([ (header::CACHE_CONTROL, "no-store, max-age=0"), (header::PRAGMA, "no-cache"), (header::CONTENT_TYPE, "application/json") ], body.to_string())
+    (
+        [
+            (header::CACHE_CONTROL, "no-store, max-age=0"),
+            (header::PRAGMA, "no-cache"),
+            (header::CONTENT_TYPE, "application/json"),
+        ],
+        body.to_string(),
+    )
 }

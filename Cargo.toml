@@ -18,3 +18,12 @@ thiserror = "1"
 dotenvy = "0.15"
 time = { version = "0.3", features = ["macros"] }
 anyhow = "1"
+
+# Optional built-in HTTPS with Let's Encrypt (enable with --features acme)
+tokio-rustls = { version = "0.25", optional = true }
+axum-server = { version = "0.6", optional = true, features = ["tls-rustls"] }
+rustls-acme = { version = "0.10", optional = true, features = ["tokio", "axum"] }
+
+[features]
+default = []
+acme = ["tokio-rustls", "axum-server", "rustls-acme"]
