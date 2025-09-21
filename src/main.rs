@@ -190,9 +190,11 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/", get(index))
+        .route("/admin", get(admin_page))
         .route("/api/message", post(send_message))
         .route("/assets/app.js", get(app_js))
         .route("/api/queue", get(get_queue))
+        .route("/api/admin/remove", post(admin_remove))
         .with_state(state)
         .layer(TraceLayer::new_for_http());
 
@@ -817,4 +819,98 @@ async fn get_queue(State(state): State<AppState>) -> impl IntoResponse {
         ],
         body.to_string(),
     )
+}
+
+async fn admin_page() -> impl IntoResponse {
+    let html = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trouw Gordijn • Admin</title>
+  <style>
+    body { background:#101014; color:#faf8f5; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial; margin:0; padding:24px; }
+    .card { background:#161823; border:1px solid #2a2d3a; border-radius:16px; padding:18px; max-width:860px; margin:0 auto; }
+    h1 { margin:0 0 10px; }
+    .row { display:flex; gap:10px; align-items:center; }
+    button { background:#2a2d3a; color:#fff; border:none; padding:8px 12px; border-radius:8px; cursor:pointer; }
+    button.danger { background:#7b1c1c; }
+    ul { list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:8px; }
+    li { display:flex; gap:10px; align-items:center; padding:10px; border-radius:10px; background:#1d1f2a; border:1px solid #2a2d3a; }
+    .swatch { width:14px; height:14px; border-radius:3px; border:1px solid rgba(0,0,0,0.25); }
+    .text { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .tag { font-size:12px; opacity:.8; padding:2px 6px; border-radius:999px; background:#2a2d3a; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Admin • Queue</h1>
+    <div class="row" style="margin-bottom:10px">
+      <button id="refresh">Refresh</button>
+    </div>
+    <ul id="list"><li>Loading…</li></ul>
+  </div>
+  <script>
+  async function fetchQueue(){ const r = await fetch('/api/queue', {cache:'no-store'}); return await r.json(); }
+  async function removeItem(id){
+    const res = await fetch('/api/admin/remove', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: new URLSearchParams({ id:String(id) }) });
+    if(!res.ok){ alert('Remove failed: '+await res.text()); }
+    await render();
+  }
+  function li(item, label){
+    const li = document.createElement('li');
+    const sw = document.createElement('span'); sw.className='swatch'; sw.style.background = item.color || '#ffd700'; li.appendChild(sw);
+    const t = document.createElement('span'); t.className='text'; t.textContent = item.text; li.appendChild(t);
+    if(label){ const tag = document.createElement('span'); tag.className='tag'; tag.textContent = label; li.appendChild(tag); }
+    const btn = document.createElement('button'); btn.className='danger'; btn.textContent='Remove'; btn.onclick = ()=> removeItem(item.id); li.appendChild(btn);
+    return li;
+  }
+  async function render(){
+    const data = await fetchQueue();
+    const ul = document.getElementById('list'); ul.innerHTML='';
+    if(data.current){ ul.appendChild(li(data.current, 'Current')); }
+    for(const it of data.items||[]){ ul.appendChild(li(it)); }
+    if(!data.current && (!data.items || data.items.length===0)){
+      const e = document.createElement('li'); e.textContent = 'Queue is empty'; ul.appendChild(e);
+    }
+  }
+  document.getElementById('refresh').onclick = render;
+  render();
+  </script>
+</body>
+</html>
+"#;
+    (
+        [
+            (header::CACHE_CONTROL, "no-store, max-age=0"),
+            (header::PRAGMA, "no-cache"),
+        ],
+        Html(html.to_string()),
+    )
+}
+
+#[derive(Deserialize)]
+struct RemoveForm {
+    id: u64,
+}
+
+async fn admin_remove(
+    State(state): State<AppState>,
+    Form(f): Form<RemoveForm>,
+) -> impl IntoResponse {
+    // Remove from queue
+    {
+        let mut q = state.queue.lock().await;
+        q.retain(|m| m.id != f.id);
+    }
+    // If removing current, clear it
+    {
+        let mut cur = state.current.lock().await;
+        if let Some(c) = cur.as_ref() {
+            if c.id == f.id {
+                *cur = None;
+            }
+        }
+    }
+    (StatusCode::OK, "ok")
 }
