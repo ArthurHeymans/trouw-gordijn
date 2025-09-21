@@ -69,97 +69,7 @@ struct CurrentDisplay {
     started: Instant,
 }
 
-static INDEX_HTML_HEADER: &str = r##"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Trouw Gordijn</title>
-  <style>
-    :root { --gold:#d4af37; --rose:#f6d1c1; --ivory:#fffff0; --bg:#101014; --fg:#faf8f5; }
-    html,body { margin:0; padding:0; background:var(--bg); color:var(--fg); font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
-    .wrap { max-width: 860px; margin: 0 auto; padding: 24px; }
-    .card { background: #161823; border:1px solid #2a2d3a; border-radius: 16px; padding: 20px; box-shadow: 0 10px 24px rgba(0,0,0,0.35); }
-    h1 { font-weight: 700; letter-spacing: 0.5px; margin: 0 0 10px; }
-    .accent { color: var(--gold); }
-    .sub { color: #c9c6c2; margin-top:0; }
-    .grid { display:grid; gap:18px; grid-template-columns: 1fr; }
-    @media(min-width:900px){ .grid{ grid-template-columns: 1fr 1fr; } }
-    label { display:block; font-weight:600; margin-bottom:8px; }
-    input[type=text] { width:100%; padding:14px; border-radius:12px; border:1px solid #2a2d3a; background:#0e1017; color:var(--fg); font-size:16px; }
-    input[type=color] { width: 56px; height: 40px; padding:0; border-radius:8px; border:1px solid #2a2d3a; background:#0e1017; }
-    input[type=range] { width:100%; }
-    button { background: linear-gradient(135deg, var(--gold), #ffde7a); color:#2d2200; font-weight:700; border: none; padding: 12px 18px; border-radius: 12px; cursor: pointer; box-shadow: 0 6px 18px rgba(212,175,55,0.35); }
-    button:hover { filter: brightness(1.05); }
-    .hero { display:flex; align-items:stretch; justify-content:stretch; background: radial-gradient(1200px 600px at 50% -10%, rgba(212,175,55,0.18), transparent); border-radius: 16px; overflow:hidden; padding: 0; }
-    .hero img { width:100%; height:100%; object-fit:cover; display:block; }
-    .brown { background: #4e342e; color: #fff3e0; border: 1px solid #6d4c41; }
-    .queue-window { background:#4e342e; color:#fff3e0; padding:16px; width:100%; }
-    .queue-title { font-weight:700; margin:0 0 10px; letter-spacing: .3px; }
-    .queue-list { list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:8px; }
-    .queue-item { display:flex; align-items:center; gap:10px; padding:10px; border-radius:10px; background:#5d4037; border:1px solid rgba(0,0,0,0.15); }
-    .queue-item.current { outline:2px solid #ffd180; background:#6d4c41; }
-    .swatch { width:14px; height:14px; border-radius:3px; border:1px solid rgba(0,0,0,0.25); }
-    .text { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .timer { font-variant-numeric: tabular-nums; opacity: .9; }
-    .queue-empty { opacity:.8; font-style:italic; }
-    .note { font-size: 12px; color: #a3a1a0; }
-    .footer { text-align:center; color:#a3a1a0; margin-top:14px; font-size: 12px; }
-    .row { display:flex; gap:12px; align-items:center; }
-    .lang { float:right; display:flex; gap:6px; }
-    .lang button { background:#2a2d3a; color:#fff; border:none; padding:6px 8px; border-radius:8px; cursor:pointer; font-size:18px; line-height:1; }
-    .lang button.active { outline:2px solid var(--gold); }
-  </style>
-  <script src="/assets/app.js" defer></script>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card" style="margin-bottom:18px">
-      <div class="lang" id="langSelector">
-        <button type="button" data-lang="nl" aria-label="Nederlands">🇳🇱</button>
-        <button type="button" data-lang="fr" aria-label="Français">🇫🇷</button>
-        <button type="button" data-lang="de" aria-label="Deutsch">🇩🇪</button>
-      </div>
-      <h1><span class="accent">Trouw</span> Gordijn <span class="note" style="margin-left:8px">UI v5</span></h1>
-      <p class="sub" data-i18n="subtitle">Laat je felicitatie schitteren op het LED gordijn ✨</p>
-      <div class="grid">
-        <div>
-          <form onsubmit="submitMessage(event)">
-            <label for="text" data-i18n="message_label">Jouw bericht</label>
-            <input id="text" maxlength="64" required name="text" type="text" placeholder="Liefde, geluk en een lang leven samen!">
-            <div style="height:12px"></div>
-            <div>
-              <label for="color" data-i18n="color_label">Kleur</label>
-              <input id="color" type="hidden" value="#ffd700" name="color">
-              <div class="row" style="align-items:flex-start">
-                <div id="colorwheel" style="width:200px; height:200px; position:relative;">
-                  <canvas id="wheelCanvas" width="200" height="200" style="border-radius:50%; cursor:crosshair; display:block;"></canvas>
-                  <div id="pickerDot" style="position:absolute; width:12px; height:12px; border:2px solid #fff; border-radius:50%; left:94px; top:94px; pointer-events:none; box-shadow:0 0 2px rgba(0,0,0,.6);"></div>
-                </div>
-                <div id="colorPreview" title="Gekozen kleur" style="width:40px; height:40px; border-radius:8px; border:1px solid #2a2d3a; margin-left:12px; background:#ffd700"></div>
-              </div>
-            </div>
-            <div style="height:16px"></div>
-            <button type="submit" data-i18n="submit_btn">Stuur naar gordijn</button>
-            <div class="note" style="margin-top:8px" data-i18n="note">Max 64 tekens. Houd het lief en feestelijk 💛</div>
-          </form>
-        </div>
-        <div class="hero brown">
-          <div class="queue-window">
-            <h3 class="queue-title" data-i18n="queue_title">Berichten wachtrij</h3>
-            <ul id="queueList" class="queue-list">
-              <li class="queue-empty" data-i18n="queue_empty">Geen berichten in de wachtrij…</li>
-            </ul>
-          </div>
-        "##;
-
-static INDEX_HTML_FOOTER: &str = r##"        </div>
-      </div>
-    </div>
-    <div class="footer" data-i18n="footer">Met liefde gemaakt • Wens fijn en respectvol 💐</div>
-  </div>
-</body>
-</html>"##;
+// UI assets are compiled in from the assets/ directory
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -193,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin", get(admin_page))
         .route("/api/message", post(send_message))
         .route("/assets/app.js", get(app_js))
+        .route("/assets/admin.js", get(admin_js))
         .route("/api/queue", get(get_queue))
         .route("/api/admin/remove", post(admin_remove))
         .with_state(state)
@@ -269,19 +180,18 @@ fn load_config() -> anyhow::Result<AppConfig> {
 }
 
 async fn index(State(_state): State<AppState>) -> impl IntoResponse {
-    let mut html = String::with_capacity(4096);
-    html.push_str("<!-- UI_VERSION: wheel-v4 -->\n");
-    html.push_str(INDEX_HTML_HEADER);
-    html.push_str(INDEX_HTML_FOOTER);
+    let html: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/index.html"));
     (
         [
             (header::CACHE_CONTROL, "no-store, max-age=0"),
             (header::PRAGMA, "no-cache"),
         ],
-        Html(html),
+        Html(html.to_string()),
     )
 }
 
+/*
+#[allow(dead_code)]
 static APP_JS: &str = r#"(function(){
   const I18N = {
     nl: {
@@ -477,8 +387,10 @@ static APP_JS: &str = r#"(function(){
 
   if (document.readyState !== 'loading') boot(); else window.addEventListener('DOMContentLoaded', boot);
 })();"#;
+*/
 
 async fn app_js() -> impl IntoResponse {
+    let js: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/app.js"));
     (
         [
             (
@@ -488,7 +400,7 @@ async fn app_js() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-store, max-age=0"),
             (header::PRAGMA, "no-cache"),
         ],
-        APP_JS,
+        js,
     )
 }
 
@@ -894,70 +806,28 @@ async fn get_queue(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn admin_page() -> impl IntoResponse {
-    let html = r#"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Trouw Gordijn • Admin</title>
-  <style>
-    body { background:#101014; color:#faf8f5; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial; margin:0; padding:24px; }
-    .card { background:#161823; border:1px solid #2a2d3a; border-radius:16px; padding:18px; max-width:860px; margin:0 auto; }
-    h1 { margin:0 0 10px; }
-    .row { display:flex; gap:10px; align-items:center; }
-    button { background:#2a2d3a; color:#fff; border:none; padding:8px 12px; border-radius:8px; cursor:pointer; }
-    button.danger { background:#7b1c1c; }
-    ul { list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:8px; }
-    li { display:flex; gap:10px; align-items:center; padding:10px; border-radius:10px; background:#1d1f2a; border:1px solid #2a2d3a; }
-    .swatch { width:14px; height:14px; border-radius:3px; border:1px solid rgba(0,0,0,0.25); }
-    .text { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .tag { font-size:12px; opacity:.8; padding:2px 6px; border-radius:999px; background:#2a2d3a; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>Admin • Queue</h1>
-    <div class="row" style="margin-bottom:10px">
-      <button id="refresh">Refresh</button>
-    </div>
-    <ul id="list"><li>Loading…</li></ul>
-  </div>
-  <script>
-  async function fetchQueue(){ const r = await fetch('/api/queue', {cache:'no-store'}); return await r.json(); }
-  async function removeItem(id){
-    const res = await fetch('/api/admin/remove', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: new URLSearchParams({ id:String(id) }) });
-    if(!res.ok){ alert('Remove failed: '+await res.text()); }
-    await render();
-  }
-  function li(item, label){
-    const li = document.createElement('li');
-    const sw = document.createElement('span'); sw.className='swatch'; sw.style.background = item.color || '#ffd700'; li.appendChild(sw);
-    const t = document.createElement('span'); t.className='text'; t.textContent = item.text; li.appendChild(t);
-    if(label){ const tag = document.createElement('span'); tag.className='tag'; tag.textContent = label; li.appendChild(tag); }
-    const btn = document.createElement('button'); btn.className='danger'; btn.textContent='Remove'; btn.onclick = ()=> removeItem(item.id); li.appendChild(btn);
-    return li;
-  }
-  async function render(){
-    const data = await fetchQueue();
-    const ul = document.getElementById('list'); ul.innerHTML='';
-    if(data.current){ ul.appendChild(li(data.current, 'Current')); }
-    for(const it of data.items||[]){ ul.appendChild(li(it)); }
-    if(!data.current && (!data.items || data.items.length===0)){
-      const e = document.createElement('li'); e.textContent = 'Queue is empty'; ul.appendChild(e);
-    }
-  }
-  document.getElementById('refresh').onclick = render;
-  render();
-  </script>
-</body>
-</html>
-"#;
+    let html: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/admin.html"));
     (
         [
             (header::CACHE_CONTROL, "no-store, max-age=0"),
             (header::PRAGMA, "no-cache"),
         ],
         Html(html.to_string()),
+    )
+}
+
+async fn admin_js() -> impl IntoResponse {
+    let js: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/admin.js"));
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (header::CACHE_CONTROL, "no-store, max-age=0"),
+            (header::PRAGMA, "no-cache"),
+        ],
+        js,
     )
 }
 
