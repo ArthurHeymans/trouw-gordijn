@@ -97,22 +97,30 @@ static INDEX_HTML_HEADER: &str = r##"<!doctype html>
     .note { font-size: 12px; color: #a3a1a0; }
     .footer { text-align:center; color:#a3a1a0; margin-top:14px; font-size: 12px; }
     .row { display:flex; gap:12px; align-items:center; }
+    .lang { float:right; display:flex; gap:6px; }
+    .lang button { background:#2a2d3a; color:#fff; border:none; padding:6px 8px; border-radius:8px; cursor:pointer; font-size:18px; line-height:1; }
+    .lang button.active { outline:2px solid var(--gold); }
   </style>
   <script src="/assets/app.js" defer></script>
 </head>
 <body>
   <div class="wrap">
     <div class="card" style="margin-bottom:18px">
+      <div class="lang" id="langSelector">
+        <button type="button" data-lang="nl" aria-label="Nederlands">🇳🇱</button>
+        <button type="button" data-lang="fr" aria-label="Français">🇫🇷</button>
+        <button type="button" data-lang="de" aria-label="Deutsch">🇩🇪</button>
+      </div>
       <h1><span class="accent">Trouw</span> Gordijn <span class="note" style="margin-left:8px">UI v5</span></h1>
-      <p class="sub">Laat je felicitatie schitteren op het LED gordijn ✨</p>
+      <p class="sub" data-i18n="subtitle">Laat je felicitatie schitteren op het LED gordijn ✨</p>
       <div class="grid">
         <div>
           <form onsubmit="submitMessage(event)">
-            <label for="text">Jouw bericht</label>
+            <label for="text" data-i18n="message_label">Jouw bericht</label>
             <input id="text" maxlength="64" required name="text" type="text" placeholder="Liefde, geluk en een lang leven samen!">
             <div style="height:12px"></div>
             <div>
-              <label for="color">Kleur</label>
+              <label for="color" data-i18n="color_label">Kleur</label>
               <input id="color" type="hidden" value="#ffd700" name="color">
               <div class="row" style="align-items:flex-start">
                 <div id="colorwheel" style="width:200px; height:200px; position:relative;">
@@ -123,15 +131,15 @@ static INDEX_HTML_HEADER: &str = r##"<!doctype html>
               </div>
             </div>
             <div style="height:16px"></div>
-            <button type="submit">Stuur naar gordijn</button>
-            <div class="note" style="margin-top:8px">Max 64 tekens. Houd het lief en feestelijk 💛</div>
+            <button type="submit" data-i18n="submit_btn">Stuur naar gordijn</button>
+            <div class="note" style="margin-top:8px" data-i18n="note">Max 64 tekens. Houd het lief en feestelijk 💛</div>
           </form>
         </div>
         <div class="hero brown">
           <div class="queue-window">
-            <h3 class="queue-title">Berichten wachtrij</h3>
+            <h3 class="queue-title" data-i18n="queue_title">Berichten wachtrij</h3>
             <ul id="queueList" class="queue-list">
-              <li class="queue-empty">Geen berichten in de wachtrij…</li>
+              <li class="queue-empty" data-i18n="queue_empty">Geen berichten in de wachtrij…</li>
             </ul>
           </div>
         "##;
@@ -139,7 +147,7 @@ static INDEX_HTML_HEADER: &str = r##"<!doctype html>
 static INDEX_HTML_FOOTER: &str = r##"        </div>
       </div>
     </div>
-    <div class=\"footer\">Met liefde gemaakt • Wens fijn en respectvol 💐</div>
+    <div class="footer" data-i18n="footer">Met liefde gemaakt • Wens fijn en respectvol 💐</div>
   </div>
 </body>
 </html>"##;
@@ -218,12 +226,63 @@ async fn index(State(_state): State<AppState>) -> impl IntoResponse {
 }
 
 static APP_JS: &str = r#"(function(){
+  const I18N = {
+    nl: {
+      subtitle: 'Laat je felicitatie schitteren op het LED gordijn ✨',
+      message_label: 'Jouw bericht',
+      color_label: 'Kleur',
+      submit_btn: 'Stuur naar gordijn',
+      note: 'Max 64 tekens. Houd het lief en feestelijk 💛',
+      queue_title: 'Berichten wachtrij',
+      queue_empty: 'Geen berichten in de wachtrij…',
+      footer: 'Met liefde gemaakt • Wens fijn en respectvol 💐',
+      error_prefix: 'Mislukt:',
+      placeholder_text: 'Liefde, geluk en een lang leven samen!'
+    },
+    fr: {
+      subtitle: 'Faites briller votre félicitation sur le rideau LED ✨',
+      message_label: 'Votre message',
+      color_label: 'Couleur',
+      submit_btn: 'Envoyer au rideau',
+      note: '64 caractères max. Restez gentil et festif 💛',
+      queue_title: 'File d’attente des messages',
+      queue_empty: 'Aucun message dans la file d’attente…',
+      footer: 'Fait avec amour • Souhaitez avec gentillesse 💐',
+      error_prefix: 'Échec :',
+      placeholder_text: 'Amour, bonheur et une longue vie ensemble !'
+    },
+    de: {
+      subtitle: 'Lass deine Glückwünsche auf dem LED‑Vorhang erstrahlen ✨',
+      message_label: 'Deine Nachricht',
+      color_label: 'Farbe',
+      submit_btn: 'An den Vorhang senden',
+      note: 'Max. 64 Zeichen. Bitte lieb und festlich 💛',
+      queue_title: 'Nachrichten‑Warteschlange',
+      queue_empty: 'Keine Nachrichten in der Warteschlange…',
+      footer: 'Mit Liebe gemacht • Wünsche freundlich und respektvoll 💐',
+      error_prefix: 'Fehlgeschlagen:',
+      placeholder_text: 'Liebe, Glück und ein langes gemeinsames Leben!'
+    }
+  };
+  function getLang(){ return localStorage.getItem('lang') || 'nl'; }
+  function setLang(l){ localStorage.setItem('lang', l); applyTranslations(); markActiveLang(); refreshQueue().catch(()=>{}); }
+  function tr(key){ const lang = getLang(); return (I18N[lang] && I18N[lang][key]) || (I18N['nl'] && I18N['nl'][key]) || null; }
+  function applyTranslations(){
+    document.querySelectorAll('[data-i18n]').forEach(el=>{
+      const k = el.getAttribute('data-i18n'); if(!k) return;
+      const v = tr(k);
+      if(v != null) el.textContent = v; // only replace when we have a translation
+    });
+    const input = document.getElementById('text'); if(input){ const ph = tr('placeholder_text'); if(ph!=null) input.placeholder = ph; }
+  }
+  function markActiveLang(){ const sel = document.getElementById('langSelector'); if(!sel) return; const cur = getLang(); sel.querySelectorAll('button[data-lang]').forEach(btn=>{ btn.classList.toggle('active', btn.getAttribute('data-lang')===cur); }); }
+
   async function submitMessage(ev){
     ev.preventDefault();
     const fd = new FormData(ev.target);
     const res = await fetch('/api/message', { method: 'POST', body: new URLSearchParams(fd) });
     if(res.ok){ ev.target.reset(); try{ await refreshQueue(); }catch(e){} }
-    else { const t = await res.text(); alert('Mislukt: '+t); }
+    else { const tt = await res.text(); const pref = tr('error_prefix') || 'Mislukt:'; alert(pref+' '+tt); }
   }
   window.submitMessage = submitMessage;
 
@@ -329,7 +388,7 @@ static APP_JS: &str = r#"(function(){
     const data = await r.json();
     ul.innerHTML = '';
     if(!data.current && (!data.items || data.items.length===0)){
-      const li = document.createElement('li'); li.className='queue-empty'; li.textContent='Geen berichten in de wachtrij…'; ul.appendChild(li); return;
+      const li = document.createElement('li'); li.className='queue-empty'; li.textContent= tr('queue_empty') || 'Geen berichten in de wachtrij…'; ul.appendChild(li); return;
     }
     const renderItem = (item, isCurrent, elapsed) => {
       const li = document.createElement('li'); li.className='queue-item'+(isCurrent?' current':'');
@@ -349,6 +408,11 @@ static APP_JS: &str = r#"(function(){
 
   function boot(){
     initColorWheel();
+    // lang selector
+    const sel = document.getElementById('langSelector');
+    if(sel){ sel.addEventListener('click', (e)=>{ const btn = e.target.closest('button[data-lang]'); if(btn){ setLang(btn.getAttribute('data-lang')); }}); }
+    applyTranslations();
+    markActiveLang();
     refreshQueue();
     setInterval(()=>{ refreshQueue().catch(()=>{}); }, 5000);
     setInterval(tickTimer, 1000);
