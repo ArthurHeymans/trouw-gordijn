@@ -750,20 +750,10 @@ async fn apply_display(state: &AppState, text: &str, color: Option<&str>) -> any
     }
     let base = format!("http://127.0.0.1:{}", state.cfg.local_tunnel_port);
 
-    let (r, g, b) = color.and_then(parse_hex_color).unwrap_or((255, 215, 0));
-    let bri: u8 = 128;
-    let json_body = serde_json::json!({
-        "on": true,
-        "bri": bri,
-        "seg": [{ "id": 0, "n": text, "col": [[r, g, b]] }]
-    });
-    let _ = state
-        .client
-        .post(format!("{}/json/state", base))
-        .json(&json_body)
-        .send()
-        .await;
-
+    // Ensure scrolling text effect is active first
+    // If a preset is provided, switch to it (assumed to be the scrolling text preset).
+    // Otherwise, pick the scrolling text effect index and include it in the next state update.
+    let mut fx_idx: Option<usize> = None;
     if let Some(ps) = state.cfg.text_preset_id {
         let _ = state
             .client
@@ -771,13 +761,85 @@ async fn apply_display(state: &AppState, text: &str, color: Option<&str>) -> any
             .json(&serde_json::json!({"ps": ps}))
             .send()
             .await;
+    } else {
+        fx_idx = find_text_effect_index(&state.client, &base).await;
     }
 
+    // Now apply color (as Color 1), select a palette that respects Color 1, and set the segment name to the message.
+    // If effect index is known (no preset), set it alongside to ensure the effect is scrolling text.
+    let (r, g, b) = color.and_then(parse_hex_color).unwrap_or((255, 215, 0));
+    let bri: u8 = 128;
+    // Force the effect's color mode to use Color 1
+    // WLED 0.14+: use o1 (first effect option). Older builds may accept c1.
+    let mut seg = serde_json::json!({ "id": 0, "n": text, "col": [[r, g, b]], "o1": 0, "c1": 0 });
+    if let Some(p) = find_color1_palette_index(&state.client, &base).await { seg["pal"] = serde_json::json!(p); }
+    if let Some(idx) = fx_idx {
+        seg["fx"] = serde_json::json!(idx);
+    }
+    let json_body = serde_json::json!({ "on": true, "bri": bri, "seg": [ seg ] });
+    let _ = state
+        .client
+        .post(format!("{}/json/state", base))
+        .json(&json_body)
+        .send()
+        .await;
+
+    // Optional legacy text API
     if let Some(key) = &state.cfg.text_param_key {
         let url = format!("{}/win?{}={}", base, key, urlencoding::encode(text));
         let _ = state.client.get(url).send().await;
     }
     Ok(())
+}
+
+static TEXT_EFFECT_INDEX: once_cell::sync::OnceCell<usize> = once_cell::sync::OnceCell::new();
+async fn find_text_effect_index(client: &reqwest::Client, base: &str) -> Option<usize> {
+    if let Some(idx) = TEXT_EFFECT_INDEX.get() {
+        return Some(*idx);
+    }
+    let url = format!("{}/json/effects", base);
+    let res = client.get(url).send().await.ok()?;
+    let effects: serde_json::Value = res.json().await.ok()?;
+    let arr = effects.as_array()?;
+    let mut candidate: Option<usize> = None;
+    for (i, v) in arr.iter().enumerate() {
+        if let Some(name) = v.as_str() {
+            let lc = name.to_lowercase();
+            if lc.contains("scroll") && lc.contains("text") {
+                candidate = Some(i);
+                break;
+            }
+            if candidate.is_none() && lc.contains("text") {
+                candidate = Some(i);
+            }
+        }
+    }
+    if let Some(i) = candidate {
+        let _ = TEXT_EFFECT_INDEX.set(i);
+        return Some(i);
+    }
+    None
+}
+
+static COLOR1_PALETTE_INDEX: once_cell::sync::OnceCell<usize> = once_cell::sync::OnceCell::new();
+async fn find_color1_palette_index(client: &reqwest::Client, base: &str) -> Option<usize> {
+    if let Some(idx) = COLOR1_PALETTE_INDEX.get() { return Some(*idx); }
+    let url = format!("{}/json/palettes", base);
+    let res = client.get(url).send().await.ok()?;
+    let palettes: serde_json::Value = res.json().await.ok()?;
+    let arr = palettes.as_array()?;
+    let mut candidate: Option<usize> = None;
+    for (i, v) in arr.iter().enumerate() {
+        if let Some(name) = v.as_str() {
+            let lc = name.to_lowercase();
+            if lc.contains("primary") || lc.contains("color 1") || lc.contains("single") || lc.contains("solid") {
+                candidate = Some(i);
+                break;
+            }
+        }
+    }
+    if let Some(i) = candidate { let _ = COLOR1_PALETTE_INDEX.set(i); return Some(i); }
+    None
 }
 
 async fn get_queue(State(state): State<AppState>) -> impl IntoResponse {
