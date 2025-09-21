@@ -769,9 +769,19 @@ async fn apply_display(state: &AppState, text: &str, color: Option<&str>) -> any
     // If effect index is known (no preset), set it alongside to ensure the effect is scrolling text.
     let (r, g, b) = color.and_then(parse_hex_color).unwrap_or((255, 215, 0));
     let bri: u8 = 128;
-    // Force the effect's color mode to use Color 1
-    // WLED 0.14+: use o1 (first effect option). Older builds may accept c1.
-    let mut seg = serde_json::json!({ "id": 0, "n": text, "col": [[r, g, b]], "o1": 0, "c1": 0 });
+    // Force the effect's color mode to use Color 1 and set font size to max.
+    // WLED 0.14+: preferred is the consolidated options array `o: [o1, o2, ...]`.
+    // For Scrolling Text: o1 = color mode (0 = Color 1), o2 = font size (max 255).
+    // Keep legacy fields (o1/o2/c1) for compatibility.
+    let mut seg = serde_json::json!({
+        "id": 0,
+        "n": text,
+        "col": [[r, g, b]],
+        "o": [0, 255],
+        "o1": 0,
+        "c2": 255,
+        "c1": 0
+    });
     if let Some(p) = find_color1_palette_index(&state.client, &base).await { seg["pal"] = serde_json::json!(p); }
     if let Some(idx) = fx_idx {
         seg["fx"] = serde_json::json!(idx);
